@@ -6,12 +6,12 @@
  * @since Abril 2022
  */
 
-include __DIR__ . '/../src/utils/docsimple.php';
-include __DIR__ . '/../src/miframe/functions.php';
+include __DIR__ . '/../src/docsimple.php';
+include __DIR__ . '/../src/functions.php';
 
 $files = array(
-	0 => __DIR__ . '/../src/utils/docsimple.php',
-	1 => __DIR__ . '/../src/miframe/functions.php',
+	0 => __DIR__ . '/../src/docsimple.php',
+	1 => __DIR__ . '/../src/functions.php',
 );
 
 $selecto = 0;
