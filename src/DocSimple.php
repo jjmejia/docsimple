@@ -1,8 +1,9 @@
 <?php
 /**
- * Generador de documentación de código a partir de los bloques de comentarios incluidos en el código.
+ * Generador de documentación de código a partir de los bloques de comentarios
+ * incluidos en el código.
  *
- * Funciona con base en el modelo Javadoc adaptado según se describe en [phpDocumentor]
+ * Funciona con base en el modelo Javadoc adaptado según se describe en phpDocumentor
  * (https://docs.phpdoc.org/guide/guides/docblocks.html), donde se documenta en bloques de comentario dentro del script,
  * las clases y/o las funciones contenidas en el mismo.
  * Algunos tags a tener en cuenta:
@@ -19,27 +20,49 @@
  *
  * Tener presente que En PHP el bloque documento va antes de la definición de la función/clase. En lenguajes como Python va después.
  *
- * @uses miframe/functions
+ * En caso de encontrar documentación faltante, se reportan en el arreglo de salida agrupados bajo el item "errors".
  *
+ * @uses miframe/common/functions
  * @author John Mejia
  * @since Abril 2022
  */
 
-namespace miFrame;
+namespace miFrame\Utils;
 
+/**
+ * Clase para obtener la documentación del código a partir de los bloques de comentarios.
+ * Las siguientes propiedades públicas pueden ser usadas:
+ *
+ * - $tags:  array. Atributos para evaluar documentación. Se predefine en el __construct() de la clase para soportar el modelo PHP Javadoc.
+ * - $debug: boolean. TRUE para incluir mensajes de depuración.
+ * - $evalRequiredItems: boolean. TRUE para evaluar elementos mínimos requeridos. Se reportan en el arreglo de salida agrupados
+ * 		bajo el item "errors".
+ * - $usesFunction: Función a usar al mostrar elemento "@uses" en `$this->getDocumentationHTML()`. Retorna texto HTML. Ej:
+ * 		function ($modulo, $infomodulo) { ... return $html; }
+ * - $parserTextFunction: Función a usar para interpretar el texto (asumiendo formato Markdown). Retorna texto HTML. Ej:
+ * 		function (text) { ... return $html; }
+ */
 class DocSimple {
 
-	private $solo_main_summary = false;
 	private $tipodoc = '';
 	private $interpreter = array();
+	private $cache = array();
 
 	public $tags = array();
 	public $debug = false;
-	public $pathCache = '';
+	public $evalRequiredItems = true;
+	public $usesFunction = false;
+	public $parserTextFunction = false;
 
 	public function __construct() {
 
 		// Elementos para detectar el bloque de documentación en el código. Por defecto se define para PHP.
+
+		// $this->regex_comment = "/^(\/\/|#)(.*)/";
+		// $this->regex_assoc = "/^(class|private function|public function|protected function|function)[\s\n](.*)/";
+		// $this->regex_eval = array(
+		// 	'class' => array("/^(\S+)?([\s\n].*)\{(.*)/", " $1"),
+		// 	'*' => array("/^(\S+)[\s\n]*\([\s\n]{0,}(.*)[\s\n]{0,}\)[\s\n]{0,}\{(.*)/", " $1($2)")
 
 		$this->tags = array(
 			'code-start' 		=> '<?',
@@ -52,12 +75,26 @@ class DocSimple {
 			'strings'			=> array('"', "'"),
 			'strings-escape'	=> '\\',					// Ignora siguiente caracter dentro de una cadena
 			'functions'			=> array('public function', 'private function', 'protected function', 'function', 'class', 'namespace'),
+															// Declaraciòn de funciones/clases
 			'separators-end'	=> array('{', '}', ';'),
 			'no-spaces'			=> array('(', ')', ','),	// Remueve espacios antes de este caracter
 			'args-start'		=> '(',						// Marca inicio de argumentos en declaración de funciones
 			'args-end'			=> ')',
+			'eval-args'			=> '/\$([a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*)/',
+															// regexp para validar variables dentro de los argumentos de la función
 		);
 
+		// Inicializa elemento "file" para prevenir error al validar la primera vez
+		$this->cache = array('file' => '');
+	}
+
+	/**
+	 * Retorna el nombre del último archivo procesado.
+	 *
+	 * @return string Path completo del archivo procesado.
+	 */
+	public function filename() {
+		return $this->cache['file'];
 	}
 
 	/**
@@ -69,9 +106,7 @@ class DocSimple {
 	 */
 	public function getSummary(string $filename, mixed $required = array()) {
 
-		$this->solo_main_summary = true;
-		$documento = $this->getDocumentation($filename);
-		$this->solo_main_summary = false;
+		$documento = $this->getDocumentation($filename, '', true);
 
 		$retornar = array();
 		if (isset($documento['main'])) {
@@ -96,12 +131,20 @@ class DocSimple {
 
 	/**
 	 * Recupera los bloques de documentación del archivo $filename.
+	 * Retorna un arreglo con la siguiente estructura:
+	 * - file: Nombre del archivo ($filename).
+	 * - main: Documentación del script (corresponde al primer bloque de documentación encontrado).
+	 * - docs: Elementos asociados (funciones, clases, métodos).
+	 * - errors: Errores encontrados.
+	 * - index: Indice de funciones y su ubicación en el arreglo "docs", para agilizar busquedas.
+	 * - debug: Mensajes de depuración (solamente cuando modo debug es TRUE).
 	 *
-	 * @param string $filename
-	 * @param string $search
+	 * @param string $filename Nombre del script del que se va a recuperar la documentación.
+	 * @param string $search_function Nombre de la función a buscar.
+	 * @param bool $only_summary TRUE retorna solamente el bloque de resumen (summary). FALSE retorna toda la documentación.
 	 * @return array Arreglo con todos los documentos recuperados.
 	 */
-	public function getDocumentation(string $filename, string $search = '') {
+	public function getDocumentation(string $filename, string $search_function = '', bool $only_summary = false) {
 
 		$documento = array(
 			// 'module' => $modulo . '/' . $submodulo,
@@ -110,33 +153,36 @@ class DocSimple {
 			'main' 		=> array(),
 			'docs'  	=> array(),
 			'errors'	=> array(),
-			'index' 	=> array()
+			'index' 	=> array(),
+			'debug'		=> array()
 			);
 
+		// Texto a usar en mensajes de error
+		$archivo = $filename;
+		if (!$this->debug) { $archivo = basename($filename); }
+
 		if (!file_exists($filename)) {
-			$documento['errors'][] = 'Archivo base no existe (' . basename($filename) . ')';
+			$documento['errors'][] = 'Archivo base no existe (' . $archivo . ')';
 			return $documento;
 		}
 
-		// PENDIENTE: Si se indica manejo de caché, buscar el archivo cacheado sea con fecha < que el real y > que este.
-		$filecache = miframe_path($this->pathCache, basename($filename));
-		if ($this->pathCache != '' && file_exists($filecache)) {
-
-			// ...
-
+		// Valida si coincide con la más reciente captura.
+		if (strtolower($this->cache['file']) === strtolower($filename) && !$only_summary) {
+			$documento = $this->cache;
+			if (is_debug_on()) {
+				$documento['debug'][] = 'Recuperado de caché previo';
+			}
 		}
 		else {
-			$pos = strrpos($filename, '.');
-			if ($pos === false) {
-				$documento['errors'][] = 'No puede identificar el tipo de archivo a procesar (' . basename($filename) . ')';
+			$extension = miframe_extension($filename);
+			if ($extension == '') {
+				$documento['errors'][] = 'No puede identificar el tipo de archivo a procesar (' . $archivo . ')';
 				return $documento;
 			}
 
-			$extension = strtolower(substr($filename, $pos + 1));
-
 			// PENDIENTE: Cargar codigo para recuperar informaciòn. Por defecto asume PHP
-			if ($extension != 'php') {
-				$documento['errors'][] = 'No puede documentar el tipo de archivo indicado (' . basename($filename) . ')';
+			if ($extension != '.php') {
+				$documento['errors'][] = 'No puede documentar el tipo de archivo indicado (' . $archivo . ')';
 				return $documento;
 			}
 
@@ -175,8 +221,8 @@ class DocSimple {
 					// Ignora todo hasta encontrar "<?"
 					if ($car == $this->tags['code-start']) {
 						$es_codigo = true;
-						if ($this->tags['code-start-full'] != '' &&
-							(substr($contenido, $i, $len_full) == $this->tags['code-start-full'])
+						if ($this->tags['code-start-full'] != ''
+							&& (substr($contenido, $i, $len_full) == $this->tags['code-start-full'])
 							) {
 								$i += $len_full - 1;
 						}
@@ -212,9 +258,9 @@ class DocSimple {
 								$esta_ignorando = true;
 								$tag_cierre = $this->tags['comment-ml-end'];
 								$es_documentacion = (
-													$this->tags['comment-ml-start'] === '/*' &&
+													$this->tags['comment-ml-start'] === '/*'
 													// Ignora los fin de linea antes y después
-													trim(substr($contenido, $i - 1, 5)) === '/**'
+													&& trim(substr($contenido, $i - 1, 5)) === '/**'
 													);
 								if (!$es_documentacion) {
 									$i ++; // Lee siguiente bloque luego de apertura de comentario
@@ -284,11 +330,13 @@ class DocSimple {
 							$len_car = $len_inicio;
 
 							if ($es_documentacion) {
-								$bloquedoc = $this->evalDocBlock($acum);
+								$bloquedoc = $this->evalDocBlock($acum, $filename);
 								if ($total_functions <= 0) {
 									$nuevo['main'] = $bloquedoc;
 									$bloquedoc = array();
 									$total_functions ++;
+									// Si solo requiere sumario, abandona el resto
+									if ($only_summary) { break; }
 								}
 							}
 							elseif ($en_cadena) {
@@ -320,41 +368,116 @@ class DocSimple {
 
 			$this->evalCodeBlock($acum, $bloquedoc, $nuevo);
 
+			/*if (isset($nuevo['namespace'])) {
+				$documento['namespace'] = $nuevo['namespace'];
+				unset($nuevo['namespace']);
+			}*/
+
 			if (isset($nuevo['main'])) {
+				// Evalua requeridos
+				if (!$only_summary) {
+					$this->docblock_required_items($documento['errors'], $nuevo['main'], true);
+				}
+				// Reasigna main
 				$documento['main'] = $nuevo['main'];
 				unset($nuevo['main']);
 			}
 
-			$documento['docs'] = $nuevo;
+			if (!$only_summary) {
+				$documento['docs'] = $nuevo;
 
-			// debug_box($documento);
+				// debug_box($documento);
 
-			// Construye indice de funciones
-			$documento['index'] = array();
-			foreach ($nuevo as $k => $info) {
-				if (isset($info['function'])) {
-					$documento['index'][strtolower($info['function'])] = $k;
+				// Construye indice de funciones
+				$documento['index'] = array();
+				foreach ($nuevo as $k => $info) {
+					if (isset($info['function'])) {
+						$documento['index'][strtolower($info['function'])] = $k;
+						// Revisa requeridos
+						$this->docblock_required_items($documento['errors'], $info);
+					}
 				}
-			}
 
-			// PENDIENTE: Si se indica manejo de caché, guardar
-			if ($this->pathCache != '') {
+				// Preserva captura
+				$this->cache = $documento;
 			}
 		}
 
 		// Busca función indicada
-		if ($search != '') {
-			if (isset($documento['index'][$search])) {
+		if ($search_function != '') {
+			if (isset($documento['index'][$search_function])) {
 				// Elimina todos los docs y deja solamente uno
-				$documento['search'] = $documento['docs'][$documento['index'][$search]];
+				$documento['docfunction'] = $documento['docs'][$documento['index'][$search_function]];
 				$documento['docs'] = array();
 			}
 			else {
-				$documento['errors'][] = 'No hay coincidencias para la busqueda realizada (' . htmlspecialchars($search) .')';
+				$documento['errors'][] = 'No hay coincidencias para la busqueda realizada (' . htmlspecialchars($search_function) .')';
 			}
 		}
 
 		return $documento;
+	}
+
+	/**
+	 * Evalua elementos requeridos y genera mensajes de error.
+	 * Si $this->evalRequiredItems es false no realiza esta validación.
+	 *
+	 * @param array $errors Arreglo editable dónde serán registrados los mensajes de error.
+	 * @param array $info Bloque de documentación a revisar.
+	 * @param bool $is_main TRUE para indicar que $info corresponde al bloque principal (descripción del script).
+	 */
+	private function docblock_required_items(array &$errors, array $info, bool $is_main = false) {
+
+		if (!$this->evalRequiredItems) { return; }
+
+		$ignore_summary = false;
+		$origen = 'el script';
+		if (isset($info['function'])) {
+			$origen = '<b>' . $info['function'] . '</b>';
+			$ignore_summary = (
+					in_array($info['function'], [ '__construct' ])
+					|| in_array($info['type'], [ 'namespace', 'class' ])
+					);
+		}
+
+		if (!isset($info['summary']) || $info['summary'] == '') {
+			if (!$ignore_summary) {
+				$errors[] = 'No se ha documentado resumen para ' . $origen;
+			}
+		}
+
+		if (!isset($info['author']) && $is_main) {
+			$errors[] = 'No se ha documentado el autor del script';
+		}
+
+		if (isset($info['function-args']) && $info['function-args'] != ''){
+			if (!isset($info['param'])) {
+				$errors[] = 'No se ha documentado @param en ' . $origen;
+			}
+			elseif ($info['function-args'] != '') {
+				$args = $info['function-args'];
+				// Tomado de https://stackoverflow.com/questions/19562936/find-all-php-variables-with-preg-match
+				$pattern = $this->tags['eval-args'];
+				if ($pattern != '') {
+					// Los resultados quedan en $matches[0]
+					$result = preg_match_all($pattern, $args, $matches);
+					if ($result > 0) {
+						// debug_box($matches, $args);
+						foreach ($matches[0] as $k => $param) {
+							if (!isset($info['param'][$param])) {
+								$info['param'][$param] = '?';
+							}
+							else {
+								unset($info['param'][$param]);
+							}
+						}
+						if (count($info['param']) > 0) {
+							$errors[] = 'Hay argumentos @param no documentados en ' . $origen . ' (' . implode(', ', array_filter(array_keys($info['param']))) . ')';
+						}
+					}
+				}
+			}
+		}
 	}
 
 	/**
@@ -407,6 +530,14 @@ class DocSimple {
 					$docblock = array();
 					$retornar = true;
 				}
+				/*elseif ($this->tags['namespace'] != '') {
+					// Este es un caso especial, donde asigna un nombre de espacio al sistema
+					$regexp = "/^(" . $this->tags['namespace'] . ")[\s\n](.*)/";
+					preg_match($regexp, $linea, $matches);
+					if (count($matches) > 1) {
+						$container['namespace'] = $matches[2];
+					}
+				}*/
 			}
 		}
 
@@ -416,6 +547,17 @@ class DocSimple {
 	/**
 	 * Evalúa un bloque de código sanitizado previamente y recupera los atributos de documentación.
 	 *
+	 * A tener en cuenta algunas definiciones de texto Markdown a mantener:
+	 *
+	 * - Un parrafo es una o más líneas de texto consecutivas separadas por uno o más líneas en blanco. No indente parrafos normales con espacios o tabs.
+	 *   También se considera como fin de parrafo un punto o ":" al final de la línea.
+	 * - Usar ">" para indicar un texto como "blockquote".
+	 * - Cuatro espacios en blanco al inicio o un tab, indican un texto preformateado. De forma similar, texto enmarcado por "```" también
+	 *   se considera como texto preformateado.
+	 * - Listas empiezan con "*", "+" o "-". Un "*" precedido de cuatro espacios o un tab, indica que es una sublista de un item de lista
+	 *   previo.
+	 *
+	 * @link https://bitbucket.org/tutorials/markdowndemo/src/master/
 	 * @param string $text Texto con la documentación.
 	 * @return array Arreglo con los datos del documento, (Ej. [ 'summary' => ..., 'desc' => ..., etc. ])
 	 */
@@ -425,149 +567,178 @@ class DocSimple {
 		if ($text == '') { return; }
 
 		$lineas = explode("\n", $text);
-		$text = '';
+		$text = ''; // Libera memoria
+
 		$bloquedoc = array();
-		$acumdoc = '';
 		$finlinea = array('.', ':');
 		$es_pre = false;
-		$tag_pre = '';
+		$es_tags = false;
 
-		foreach ($lineas as $k => $linea) {
-			// Por defecto, todas las lineas de documentación validas empiezan con "*"
-			$linea = trim($linea);
-			if ($linea[0] === '*') {
-				$linea = substr($linea, 1);
+		$total_lineas = count($lineas);
+		$n = 0;
 
-				// Bloque preformateado
-				if ($es_pre) {
-					$acumdoc .=  $linea . "\n";
+		// debug_box($lineas, 'PRE');
+
+		// Purga las líneas buscando aquellas que sean documentación
+		for ($i = 0; $i < $total_lineas; $i ++) {
+			// Por defecto, todas las lineas de documentación validas empiezan con "* ".
+			$linea = trim($lineas[$i]);
+			$lineas[$i] = ''; // Limpia
+
+			if ($linea === '*') {
+				// Línea vacia
+				$this->docblock_newline($lineas, $n);
+				continue;
+			}
+			elseif (substr($linea, 0, 2) !== '* ') {
+				// No es una línea valida para documentación
+				continue;
+			}
+			else {
+				// Remueve marca
+				$linea = substr($linea, 2);
+			}
+
+			$slinea = trim($linea);
+
+			// Remplaza cuatro espacios por un TAB
+			$linea = str_replace('    ', "\t", $linea);
+
+			if ($linea === '```') {
+				$es_pre = !$es_pre;
+			}
+
+			// Texto preformateado convencional (no aplica si la línea actual es una lista)
+			if (trim($linea[0]) === "@") {
+				if ($lineas[$n] != '') { $n ++; }
+				$lineas[$n] = $linea;
+				$n ++;
+				$es_tags = true;
+			}
+			/*elseif ($lineas[$n] !== '') {
+				$lineas[$n] .= ' ' . $slinea;
+			}*/
+			elseif ($es_tags && $linea[0] == "\t") {
+				// Documentando tags, asume es parte de la misma linea
+				$lineas[$n - 1] .= "\n" . $linea;
+			}
+			else {
+				$es_tags = false;
+				// Fin de parrafo convencional
+				if ($n == 1 && substr($lineas[0], -1, 1) != "\n") {
+					// Parte del summary (primer linea)
+					$linea = $lineas[0] . ' ' . trim($linea);
+					$n = 0;
 				}
-
-				$linea = trim($linea);
-
-				// Valida si la linea continua definiciones de tags
-				if (!$es_pre && substr($linea, 0, 1) !== '@' && $tag_pre != '') {
-					$linea = '@' . $tag_pre . ' ' . $linea;
-				}
-
-				if ($linea === '```') {
-					$es_pre = !$es_pre;
-					if ($es_pre) { $acumdoc .= $linea . "\n"; }
-				}
-				elseif ($es_pre) {
-					continue; // Nada mas por hacer
-				}
-				elseif (substr($linea, 0, 1) === '@') {
-					// Es un tag de documentacion
-					$arreglo = explode(' ', substr($linea, 1) . ' ', 2);
-					$tag_doc = strtolower(trim($arreglo[0]));
-					$arreglo[1] = trim($arreglo[1]);
-
-					// Casos especiales:
-					// @param (tipo) (variable) (descripcion)
-					// @return (tipo) (descripcion)
-					// @uses ... siempre se guarda como arreglo
-					switch ($tag_doc) {
-						case 'param':
-							$arreglo = explode(' ', $arreglo[1] . '  ', 3);
-							$arreglo[1] = trim($arreglo[1]);
-							$arreglo[2] = trim($arreglo[2]);
-
-							if (!isset($bloquedoc[$tag_doc][$arreglo[1]])) {
-								$bloquedoc[$tag_doc][$arreglo[1]] = array('type' => trim($arreglo[0]), 'desc' => $arreglo[2]);
-							}
-							else {
-								$bloquedoc[$tag_doc][$arreglo[1]]['desc'] .= ' ' . $arreglo[2];
-							}
-							$tag_pre = $tag_doc . ' ... ' . $arreglo[1];
-							break;
-
-						case 'return':
-							$arreglo = explode(' ', $arreglo[1] . ' ', 2);
-							if (!isset($bloquedoc[$tag_doc])) {
-								$bloquedoc[$tag_doc] = array('type' => $arreglo[0], 'desc' => trim($arreglo[1]));
-							}
-							else {
-								$bloquedoc[$tag_doc]['desc'] .= ' ' . $arreglo[1];
-							}
-							$tag_pre = $tag_doc;
-							break;
-
-						case 'uses':
-							$bloquedoc[$tag_doc][] = $arreglo[1];
-							break;
-
-						case 'author':
-						case 'since':
-						case 'version':
-						case 'todo':
-						case 'link':
-							// Los acumula directamente
-							if (isset($bloquedoc[$tag_doc])) {
-								if (!is_array($bloquedoc[$tag_doc]) && $bloquedoc[$tag_doc] != '') {
-									$bloquedoc[$tag_doc] = array($bloquedoc[$tag_doc]);
-								}
-								$bloquedoc[$tag_doc][] = $arreglo[1];
-							}
-							else {
-								$bloquedoc[$tag_doc] = $arreglo[1];
-							}
-							break;
-
-						default:
-							// Los agrupa bajo "others"
-							if (isset($bloquedoc['others'][$tag_doc])) {
-								if (!is_array($bloquedoc['others'][$tag_doc]) && $bloquedoc['others'][$tag_doc] != '') {
-									$bloquedoc['others'][$tag_doc] = array($bloquedoc['others'][$tag_doc]);
-								}
-								$bloquedoc['others'][$tag_doc][] = $arreglo[1];
-							}
-							else {
-								$bloquedoc['others'][$tag_doc] = $arreglo[1];
-							}
-						}
-				}
-				elseif ($linea == '' || in_array(substr($linea, -1, 1), $finlinea)) {
-					if (!isset($bloquedoc['summary']) || $bloquedoc['summary'] == '') {
-						$bloquedoc['summary'] = trim($acumdoc . ' ' . $linea);
-						$acumdoc = '';
-					}
-					else {
-						$this->docblock_connectlines($linea, $acumdoc);
-						$acumdoc .= "\n";
-					}
-					// Remueve control de tags
-					$tag_pre = '';
+				if (!$es_pre && $linea[0] !== "\t" && $slinea[0] != '>' && in_array(substr($linea, -1, 1), $finlinea))  {
+					$lineas[$n] = $linea;
+					$this->docblock_newline($lineas, $n);
 				}
 				else {
-					$this->docblock_connectlines($linea, $acumdoc);
-					// Remueve control de tags
-					$tag_pre = '';
+					$lineas[$n] = $linea;
+					$n ++;
 				}
 			}
 		}
 
-		$acumdoc = trim($acumdoc);
-		if ($acumdoc != '') {
-			$bloquedoc['desc'] = $acumdoc;
+		$lineas = array_filter($lineas);
+
+		// debug_box($lineas, 'POS');
+
+		// Ahora si evalua cada línea
+		$total_lineas = count($lineas);
+
+		// Purga las líneas buscando aquellas que sean documentación
+		for ($i = 0; $i < $total_lineas; $i ++) {
+			$linea = trim($lineas[$i]);
+			if ($linea[0] === '@') {
+				// Es un tag de documentacion
+				$arreglo = explode(' ', substr($linea, 1) . ' ', 2);
+				$tag_doc = strtolower(trim($arreglo[0]));
+				$arreglo[1] = trim($arreglo[1]);
+
+				// Casos especiales:
+				// @param (tipo) (variable) (descripcion)
+				// @return (tipo) (descripcion)
+				// @uses ... siempre se guarda como arreglo
+				switch ($tag_doc) {
+					case 'param':
+						$arreglo = explode(' ', $arreglo[1] . '  ', 3);
+						$arreglo[1] = trim($arreglo[1]);
+						$arreglo[2] = trim($arreglo[2]);
+						$bloquedoc[$tag_doc][$arreglo[1]] = array('type' => trim($arreglo[0]), 'desc' => $arreglo[2]);
+						break;
+
+					case 'return':
+						$arreglo = explode(' ', $arreglo[1] . ' ', 2);
+						$bloquedoc[$tag_doc] = array('type' => $arreglo[0], 'desc' => trim($arreglo[1]));
+						break;
+
+					case 'uses':
+						$arreglo = explode(' ', $arreglo[1] . ' ', 2);
+						$arreglo[0] = trim($arreglo[0]);
+						$arreglo[1] = trim($arreglo[1]);
+						$bloquedoc[$tag_doc][$arreglo[0]] = $arreglo[1];
+						break;
+
+					case 'author':
+					case 'since':
+					case 'version':
+					case 'todo':
+					case 'link':
+						// Los acumula directamente
+						if (isset($bloquedoc[$tag_doc])) {
+							if (!is_array($bloquedoc[$tag_doc]) && $bloquedoc[$tag_doc] != '') {
+								$bloquedoc[$tag_doc] = array($bloquedoc[$tag_doc]);
+							}
+							$bloquedoc[$tag_doc][] = $arreglo[1];
+						}
+						else {
+							$bloquedoc[$tag_doc] = $arreglo[1];
+						}
+						break;
+
+					default:
+						// Los agrupa bajo "others"
+						if (isset($bloquedoc['others'][$tag_doc])) {
+							if (!is_array($bloquedoc['others'][$tag_doc]) && $bloquedoc['others'][$tag_doc] != '') {
+								$bloquedoc['others'][$tag_doc] = array($bloquedoc['others'][$tag_doc]);
+							}
+							$bloquedoc['others'][$tag_doc][] = $arreglo[1];
+						}
+						else {
+							$bloquedoc['others'][$tag_doc] = $arreglo[1];
+						}
+					}
+			}
+			elseif (!isset($bloquedoc['summary']) || $bloquedoc['summary'] == '') {
+				$bloquedoc['summary'] = $lineas[$i];
+				}
+			elseif (!isset($bloquedoc['desc']) || $bloquedoc['desc'] == '') {
+					$bloquedoc['desc'] = $lineas[$i];
+				}
+			else {
+				$bloquedoc['desc'] .= "\n" . $lineas[$i];
+			}
 		}
 
 		return $bloquedoc;
 	}
 
-	private function docblock_connectlines(string $linea, string &$acumdoc) {
+	/**
+	 * Adiciona fin de línea para que el interpretador lo tome correctamente.
+	 *
+	 * @param array $lines Arreglo editable de líneas.
+	 * @param int $index Indice editable con la línea del arreglo $lines actualmente en revisión.
+	 */
+	private function docblock_newline(array &$lines, int &$index) {
 
-		if ($linea != '') {
-			if ($acumdoc != '') {
-				$separador = ' ';
-				if ($linea[0] === '-' || $linea[0] === '*' || $linea[0] === '>') {
-					if (substr($acumdoc, -1, 1) !== "\n") {
-						$separador = "\n";
-					}
-				}
-				$acumdoc .= $separador . $linea;
-			}
-			else { $acumdoc = $linea; }
+		if ($lines[$index] != '') {
+			$lines[$index] .= "\n";
+			$index ++;
+		}
+		elseif ($index > 0 && $lines[$index - 1] != '' && substr($lines[$index - 1], -1, 1) != "\n") {
+			$lines[$index - 1] .= "\n";
 		}
 	}
 
@@ -575,22 +746,23 @@ class DocSimple {
 	 * Retorna la documentación encontrada en formato HTML.
 	 * Si se usa con $clickable = TRUE habilida las funciones como enlace usando el nombre "docfunction" para indicar
 	 * el nombre de la función invocada.
+	 * Intenta interpretar los textos asumiendo formato "Markdown" para generar un texto HTML equivalente. Si no se define una
+	 * función externa para este fin ($this->parserTextFunction) hace uso de la función interna docblock_parserlocal().
 	 *
-	 * @param string $filenameººº
+	 * @param string $filename
 	 * @param bool $clickable TRUE para hacer el documento navegable.
+	 * @param bool $show_errors TRUE para incluir listado de errores encontrados. FALSE los omite.
 	 * @param bool $with_styles TRUE para incluir estilos css. FALSE no los incluye.
+	 * @return string Texto HTML.
 	 */
-	public function getDocumentationHTML(string $filename, bool $clickable = false, bool $with_styles = true) {
+	public function getDocumentationHTML(string $filename, bool $clickable = false, bool $show_errors = true, bool $with_styles = true) {
 
 		$funcion = '';
 		$titulo = htmlspecialchars(basename($filename));
 		if ($clickable && isset($_REQUEST['docfunction']) && $_REQUEST['docfunction'] != '') {
 			$funcion = trim($_REQUEST['docfunction']);
 			// Enlace de retorno
-			$data = $_GET;
-			unset($data['docfunction']);
-			$url = '?' . http_build_query($data);
-			$titulo = '<p><a href="' . $url . '">' . $titulo . '</a></p>';
+			$titulo .= ' ' . $this->parserLink('Regresar a Descripción general', '');
 		}
 
 		$documento = $this->getDocumentation($filename, $funcion);
@@ -598,18 +770,22 @@ class DocSimple {
 		if ($with_styles) {
 			$salida = '
 <style>
-	.docblock { border:1px solid #d0d7de; border-radius:6px; font-family: "Segoe UI"; font-size:16px; margin:10px 32px; padding-bottom:10px; }
-	.docblock div { padding: 10px; }
+	.docblock { border:1px solid #d0d7de; border-radius:6px; font-family: "Segoe UI"; font-size:16px; margin:32px; padding-bottom:20px; }
+	.docblock div { padding: 10px 20px; }
 	.docblock p { padding: 5px 10px; margin:0; border-radius:6px; }
-	.docblock pre { border:1px dashed #d0d7de; margin:10px 64px; padding:14px; background-color:#f6f8fa;}
+	.docblock pre { border:1px dashed #d0d7de; margin:10px 64px; padding:14px; background-color:#f6f8fa; }
+	.docblock code { background-color:#f6f8fa; }
+	.docblock pre code { padding:0; }
 	.docblock ul { padding: 5px 10px 5px 32px; margin:0; }
 	.docblock li { padding-bottom: 5px; }
-	.docblock blockquote { border-left: 10px solid #d0d7de; padding:14px 15px; margin: 10px 64px; }
+	.docblock h2, .docblock .docnonav h1 { font-size:20px; margin-top:20px; border-bottom:none; }
+	.docblock .docnonav h2 { font-size:16px; margin-top:10px; }
+ 	.docblock blockquote { border-left: 10px solid #d0d7de; padding:14px 15px; margin: 10px 64px; }
 	.docblock .docfile { background-color:#f6f8fa; padding-left:20px; margin-bottom:10px; border-bottom:1px solid #d0d7de; font-weight:600; }
-	.docblock .docsummary { padding-left: 20px; }
+	.docblock .docfile a { dislay:block; float:right; font-size:14px; }
 	.docblock .docinfo { padding-left:20px; }
 	.docblock .docfunction { border-bottom:1px solid #d0d7de; font-weight:600; padding-left:20px; font-size:20px; padding-bottom:14px; margin-bottom:20px; }
-	.docblock .docerrors { border:1px solid darkred; margin-left:10px; margin-right:10px;}
+	.docblock .docerrors { border:1px solid darkred; color:darkred; font-size:14px; margin:20px 10px;}
 </style>' . PHP_EOL;
 		}
 
@@ -619,7 +795,7 @@ class DocSimple {
 				'</div>' . PHP_EOL;
 
 		// Errores encontrados
-		if (count($documento['errors']) > 0) {
+		if (count($documento['errors']) > 0 && $funcion == '' && $show_errors) {
 			$salida .= '<div class="docerrors"><ul><li>' . implode('</li><li>', $documento['errors']) . '</li></ul></div>' . PHP_EOL;
 		}
 
@@ -628,9 +804,20 @@ class DocSimple {
 			$main = $documento['main'];
 			$salida .= $this->evalHTMLDoc($main, $documento['docs'], $clickable);
 		}
-		elseif (isset($documento['search'])) {
+		elseif (isset($documento['docfunction'])) {
 			// Publica descripción de función
-			$salida .= $this->evalHTMLDoc($documento['search'], array(), $clickable);
+			$salida .= $this->evalHTMLDoc($documento['docfunction'], array(), $clickable);
+		}
+
+		if (!$clickable) {
+			// Muestra todas las funciones en la misma vista
+			$salida .= '<div class="docnonav"><h1>Contenido</h1>';
+			foreach ($documento['docs'] as $k => $info) {
+				if ($info['type'] != 'namespace') {
+					$salida .= $this->evalHTMLDoc($info, array(), $clickable)  . PHP_EOL;
+				}
+			}
+			$salida .= '</div>' . PHP_EOL;
 		}
 
 		$salida .= PHP_EOL . '</div>';
@@ -638,6 +825,15 @@ class DocSimple {
 		return $salida;
 	}
 
+	/**
+	 * Procesa contenido y genera texto HTML equivalente.
+	 *
+	 * @param mixed $main Bloque principal de documentación (summary, descripción, params, etc.).
+	 * @param mixed $contents Funciones/métodos asociadas.
+	 * @param bool $clickable TRUE genera enlaces en los nombres de las funciones/métodos y no incluye su detalle
+	 * 		en el texto generado. FALSE no incluye enlaces pero si el detalle de todas las funciones/métodos asociadas.
+	 * @return string Texto HTML.
+	 */
 	private function evalHTMLDoc(mixed $main, mixed $contents = array(), bool $clickable = false) {
 
 		$salida = '';
@@ -661,68 +857,13 @@ class DocSimple {
 		}
 
 		if (isset($main['summary']) && $main['summary'] != '') {
-			$salida .= '<p class="docsummary">' . htmlspecialchars($main['summary']) . '</p>';
+			$salida .= '<div class="docsummary">' . $this->parserText($main['summary']) . '</div>';
 		}
 
 		$salida .= $sintaxis;
 
 		if (isset($main['desc']) && $main['desc'] != '') {
-
-			$lineas = explode("\n", $main['desc']);
-			$main['desc'] = '';
-
-			$es_pre = false;
-			$tags_acum = array();
-
-			foreach ($lineas as $k => $linea) {
-
-				if ($es_pre) {
-					$main['desc'] .= htmlspecialchars($linea) . PHP_EOL;
-				}
-
-				$linea = trim($linea);
-				if ($linea === '') { continue; }
-
-				// Texto preformateado
-				if ($linea === '```') {
-					// Toogle valor
-					$es_pre = !$es_pre;
-					if ($es_pre) {
-						$main['desc'] .= $this->docblock_opentags($tags_acum, 'pre');
-					}
-					else {
-						$main['desc'] .= $this->docblock_closetags($tags_acum, 'pre') . PHP_EOL;
-					}
-					$linea = '';
-				}
-				elseif ($es_pre) {
-					continue; // Nada mas por hacer
-				}
-				// Listas
-				elseif ($linea[0] == '-' || $linea[0] == '*') {
-					$main['desc'] .= $this->docblock_opentags($tags_acum, 'ul');
-					$main['desc'] .= '<li>' . htmlspecialchars(trim(substr($linea, 1))). '</li>';
-					$linea = '';
-				}
-				// Blockquote
-				elseif ($linea[0] == '>') {
-					$main['desc'] .= $this->docblock_opentags($tags_acum, 'blockquote');
-					$main['desc'] .= htmlspecialchars(trim(substr($linea, 1)));
-					$linea = '';
-				}
-				else {
-					$main['desc'] .= $this->docblock_closetags($tags_acum, '');
-				}
-
-				if ($linea != '') {
-					$main['desc'] .= '<p>' . htmlspecialchars($linea) . '</p>' . PHP_EOL;
-				}
-			}
-
-			// Valida si terminó con un tabulado abierto
-			$main['desc'] .= $this->docblock_closetags($tags_acum, '');
-
-			$salida .= '<div class="docdesc">' . $main['desc'] . '</div>' . PHP_EOL;
+			$salida .= '<div class="docdesc">' . $this->parserText($main['desc']) . '</div>' . PHP_EOL;
 		}
 
 		if (count($contents) > 0) {
@@ -747,13 +888,10 @@ class DocSimple {
 
 					$titulo = 'Class ' . $namespace . $info['function'];
 					if (isset($info['summary']) && $info['summary'] != '') {
-						$summary = '<p>' . $info['summary'] . '</p>';
+						$summary = $this->parserText($info['summary']);
 					}
 					if ($clickable) {
-						$data = $_GET;
-						$data['docfunction'] = strtolower($info['function']);
-						$url = '?' . http_build_query($data);
-						$summary .= '<p><a href="' . $url . '">Ver detalles</a></p>';
+						$summary .= '<p>' . $this->parserLink('Ver detalles', $info['function']) . '</p>';
 					}
 				}
 				elseif (isset($info['function'])) {
@@ -763,44 +901,47 @@ class DocSimple {
 					}
 					else {
 						// Determinar si llega por GET o POST la data principal?
-						$data = $_GET;
-						$data['docfunction'] = strtolower($info['function']);
-						$url = '?' . http_build_query($data);
-						$arreglo[$function] = '<a href="' . $url . '">' . htmlspecialchars($info['function']) . '</a>';
+						$arreglo[$function] = $this->parserLink($info['function'], $info['function']);
+					}
+					if ($info['type'] != 'public function' && $info['type'] != 'function') {
+						$arreglo[$function] .= ' (' . $info['type'] . ')';
 					}
 					if (isset($info['summary']) && $info['summary'] != '') {
-						$arreglo[$function] .= ' -- ' . htmlspecialchars($info['summary']);
+						$arreglo[$function] .= ' -- ' . $this->parserText($info['summary'], true);
 					}
 				}
 			}
 
 			if (count($arreglo) > 0) {
 				ksort($arreglo);
-				$salida .= '<div class="docfun"><p><b>' . $titulo . '</b></p>' . $summary . '<ul><li>' . implode('</li><li>', $arreglo) . '</li></ul></div>' . PHP_EOL;
+				$salida .= '<div class="docfun"><h2>' . $titulo . '</h2>' . $summary . '<ul><li>' . implode('</li><li>', $arreglo) . '</li></ul></div>' . PHP_EOL;
 			}
 		}
 
 		if (isset($main['uses'])) {
-			foreach ($main['uses'] as $k => $info) {
-				$arreglo = explode(' ', $info . ' ', 2);
-				$arreglo[1] = trim($arreglo[1]);
-				$main['uses'][$k] = '<b>' . htmlspecialchars(strtolower($arreglo[0])) . '</b>';
-				if ($arreglo[1] != '') {
-					$main['uses'][$k] .= ' -- ' . htmlspecialchars($arreglo[1]);
+			foreach ($main['uses'] as $modulo => $info) {
+				if ($modulo != '' && $clickable && is_callable($this->usesFunction)) {
+					$main['uses'][$modulo] = call_user_func($this->usesFunction, $modulo, $info);
+				}
+				else {
+					$main['uses'][$modulo] = '<b>' . htmlspecialchars(strtolower($modulo)) . '</b>';
+					if ($info != '') {
+						$main['uses'][$modulo] .= ' ' . $this->parserText($info);
+					}
 				}
 			}
-			$salida .= '<div class="docuses"><p><b>Requisitos:</b></p><ul><li>' . implode('</li><li>', $main['uses']) . '</li></ul></div>' . PHP_EOL;
+			$salida .= '<div class="docuses"><h2>Requisitos</h2><ul><li>' . implode('</li><li>', $main['uses']) . '</li></ul></div>' . PHP_EOL;
 		}
 
 		if (isset($main['param'])) {
 			foreach ($main['param'] as $param => $info) {
-				$main['param'][$param] = '<b>' . $param . '</b> (' . $info['type'] . ') ' . $info['desc'];
+				$main['param'][$param] = '<b>' . $param . '</b> (' . $info['type'] . ') ' . $this->parserText($info['desc'], true);
 			}
-			$salida .= '<div class="docparam"><p><b>Parámetros</b></p><ul><li>' . implode('</li><li>', $main['param']) . '</li></ul></div>' . PHP_EOL;
+			$salida .= '<div class="docparam"><h2>Parámetros</h2><ul><li>' . implode('</li><li>', $main['param']) . '</li></ul></div>' . PHP_EOL;
 		}
 
 		if (isset($main['return'])) {
-			$salida .= '<div class="docreturn"><p><b>Valores retornados</b></p><ul><li>' . $main['return']['desc'] . '</li></ul></div>' . PHP_EOL;
+			$salida .= '<div class="docreturn"><h2>Valores retornados</h2><ul><li>' . $this->parserText($main['return']['desc'], true) . '</li></ul></div>' . PHP_EOL;
 		}
 
 		$comunes = array('version' => 'Versión', 'author' => 'Autor', 'since' => 'Creado en');
@@ -814,28 +955,211 @@ class DocSimple {
 		return $salida;
 	}
 
+	/**
+	 * Genera enlace para navegación de funciones en documentación HTML.
+	 *
+	 * @param string $titulo Título del enlace.
+	 * @param string $function Nombre de la función a buscar.
+	 * @param string $param Nombre del parámetro que indica el nombre de la función a buscar. En blanco asume "docfunction".
+	 * @return string Enlace en formato HTML.
+	 */
+	public function parserLink(string $titulo, string $function, string $param = '') {
+
+		$data = array();
+		if (count($_GET) > 0) {
+			$data = $_GET;
+		}
+		elseif (count($_POST) > 0) {
+			$data = $_POST;
+		}
+		if ($param == '') { $param = 'docfunction'; }
+		$function = trim($function);
+		if ($function == '' && isset($data[$param])) {
+			unset($data[$param]);
+		}
+		else {
+			$data[$param] = strtolower($function);
+		}
+		$url = '?' . http_build_query($data);
+		$enlace = '<a href="' . $url . '">' . htmlspecialchars($titulo) . '</a>';
+
+		return $enlace;
+	}
+
+	/**
+	 * Interprete de texto Markdown.
+	 * Puede usar una función externa para interpretar el texto (se asume tiene formato "Markdown"). Si no se ha definido una función externa,
+	 * genera un texto HTML básico usando la función interna docblock_parserlocal().
+	 *
+	 * @param string $text Texto a formatear.
+	 * @param bool $remove_tag_p Remueve tag "<p>" incluido usualmente como apertura del texto HTML.
+	 * @return string Texto HTML equivalente.
+	 */
+	public function parserText(string $text, bool $remove_tag_p = false) {
+
+		$text = trim($text);
+		if ($text != '') {
+			if (is_callable($this->parserTextFunction)) {
+				$text = call_user_func($this->parserTextFunction, $text);
+			}
+			else {
+				$text = $this->docblock_parserlocal($text);
+			}
+			// Protege enlaces
+			$text = str_replace('<a href="', '<a target="doclink" href="', $text);
+			if ($remove_tag_p) {
+				// No lo hace si hay "<p>" en medio del texto, para prevenir tags incompletos.
+				if (substr($text, 0, 3) == '<p>' && strpos($text, '<p>', 3) === false) {
+					$text = substr($text, 3);
+					if (substr($text, -4, 4) == '</p>') { $text = substr($text, 0, -4); }
+				}
+			}
+		}
+
+		return $text;
+	}
+
+	/**
+	 * Interprete de texto Markdown básico.
+	 * Esta función intenta generar un texto HTML compatible con las siguientes guías:
+	 *
+	 * - Genera un título si la línea empieza con "#", "##", "###", etc. (debe ir seguido de un espacio en blanco).
+	 * - Genera listas si la línea inicia con "-" o "*".
+	 * - Genera un bloque preformateado si lo empieza y termina con la línea "```".
+	 * - Detecta el fin de párrafo si una línea termina en "." o ":" o va seguida de una línea en blanco.
+	 *
+	 * @param string $text Texto a formatear.
+	 * @return string Texto HTML equivalente.
+	 */
+	private function docblock_parserlocal(string $text) {
+
+		$lineas = explode("\n", $text);
+		$text = '';
+		$es_pre = false;
+		$tags_acum = array();
+		$total_lineas = count($lineas);
+
+		for ($k = 0; $k < $total_lineas; $k ++) {
+
+			$linea = $lineas[$k];
+			if ($es_pre) {
+				// Está capturando texto preformateado. Continua mas adelante evaluación para
+				// detectar fin del bloque.
+				$text .= htmlspecialchars($linea) . PHP_EOL;
+				if ($linea === '```') {
+					// Toogle valor
+					$es_pre = !$es_pre;
+					$text .= $this->docblock_closetags($tags_acum, 'pre') . PHP_EOL;
+					continue;
+				}
+			}
+
+			$linea = trim($linea);
+			if ($linea === '') { continue; }
+
+			if (isset($lineas[$k +  1]) && $linea !== '```') {
+				// Lee siguiente linea
+				while (isset($lineas[$k + 1]) && !in_array(substr($linea, -1, 1), [ '.', ':' ])) {
+					$sgte = trim($lineas[$k + 1]);
+					if ($sgte == '') {
+						// Fin de parrafo (ignora la linea en blanco)
+						$k ++;
+						break;
+					}
+					elseif ($sgte == '```' || in_array($sgte[0], [ '-', '*', '>', '#'])) {
+						// Empieza item especial
+						break;
+					}
+
+					$k ++;
+					$linea .= ' ' . $sgte;
+				}
+			}
+
+			// Texto preformateado
+			if ($linea === '```') {
+				// Toogle valor
+				$es_pre = !$es_pre;
+				$text .= $this->docblock_opentags($tags_acum, 'pre');
+				$linea = '';
+			}
+			// Listas
+			elseif ($linea[0] == '-' || $linea[0] == '*') {
+				$text .= $this->docblock_opentags($tags_acum, 'ul');
+				$text .= '<li>' . htmlspecialchars(trim(substr($linea, 1))). '</li>';
+				$linea = '';
+			}
+			// Blockquote
+			elseif ($linea[0] == '>') {
+				$text .= $this->docblock_opentags($tags_acum, 'blockquote');
+				$text .= htmlspecialchars(trim(substr($linea, 1)));
+				$linea = '';
+			}
+			// Titulos
+			elseif ($linea[0] == '#') {
+				$pos = strpos($linea, ' ');
+				$tam = substr($linea, 0, $pos);
+				if (str_replace('#', '', $tam) == '') {
+					// Todos los items previos son "#"
+					$hx = 'h' . strlen($tam);
+					$text .= "<$hx>" . htmlspecialchars(trim(substr($linea, $pos + 1))) . "</$hx>" . PHP_EOL;
+					$linea = '';
+				}
+			}
+			else {
+				$text .= $this->docblock_closetags($tags_acum, '');
+			}
+
+			if ($linea != '') {
+				$text .= '<p>' . htmlspecialchars($linea) . '</p>' . PHP_EOL;
+			}
+		}
+
+		// Valida si terminó con un tabulado abierto
+		$text .= $this->docblock_closetags($tags_acum, '');
+
+		return $text;
+	}
+
+	/**
+	 * Soporte para docblock_parserlocal: Realiza apertura de tags HTML.
+	 * Si se ejecutan aperturas consecutivas del mismo tag, solo aplica la primera.
+	 *
+	 * @param array $tags_acum Arreglo editable con los tags abiertos (ul, blockquote).
+	 * @param string $tag Tag a evaluar.
+	 * @return string texto HTML con los tags abiertos (si alguno). Ej: "<ul>".
+	 */
 	private function docblock_opentags(array &$tags_acum, string $tag) {
 
 		$acum = '';
 		$i = count($tags_acum) - 1;
-		if ($i < 0 || $tags_acum[$i] != $tag) {
-			while ($i >= 0 && $tags_acum[$i] != $tag) {
+		if ($i < 0 || (isset($tags_acum[$i]) && $tags_acum[$i] != $tag)) {
+			while ($i >= 0 && isset($tags_acum[$i]) && $tags_acum[$i] != $tag) {
 				// Cierra todo hasta encontrar uno igual o llegar a ceros
 				$acum .= '</' . $tags_acum[$i] . '>';
 				unset($tags_acum[$i]);
 				$i --;
 			}
-			$tags_acum[] = $tag;
+			$i++;
+			$tags_acum[$i] = $tag;
 			$acum .= '<' . $tag . '>';
 		}
+
 		return $acum;
 	}
 
+	/**
+	 * Soporte para docblock_parserlocal: Realiza cierre de tags HTML al evaluar texto.
+	 *
+	 * @param array $tags_acum Arreglo editable con los tags abiertos (ul, blockquote).
+	 * @param string $tag Tag a evaluar. En blanco cierra todo lo abierto.
+	 * @return string texto HTML con los tags cerrados (si alguno). Ej: "</ul>".
+	 */
 	private function docblock_closetags(array &$tags_acum, string $tag) {
 
 		$acum = '';
 		$i = count($tags_acum) - 1;
-		while ($i >= 0) {
+		while ($i >= 0 && isset($tags_acum[$i])) {
 			$actual = $tags_acum[$i];
 			unset($tags_acum[$i]);
 			$acum .= '</' . $actual . '>';
@@ -847,5 +1171,4 @@ class DocSimple {
 
 		return $acum;
 	}
-
 }

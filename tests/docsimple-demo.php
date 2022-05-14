@@ -12,6 +12,7 @@ include __DIR__ . '/../src/functions.php';
 $files = array(
 	0 => __DIR__ . '/../src/docsimple.php',
 	1 => __DIR__ . '/../src/functions.php',
+	2 => __FILE__
 );
 
 $selecto = 0;
@@ -19,7 +20,7 @@ if (isset($_REQUEST['file']) && isset($files[$_REQUEST['file']])) {
 	$selecto = $_REQUEST['file'];
 }
 
-$doc = new miFrame\DocSimple();
+$doc = new \miFrame\Utils\DocSimple();
 
 $ejemplos = '';
 foreach ($files as $k => $file) {
@@ -79,11 +80,11 @@ pre.code {
 
 <p>Uso:</p`>
 <pre class="code">
-	$doc = new miFrame\DocSimple();
+	$doc = new \miFrame\DocSimple();
 	$documento = $doc->getDocumentationHTML($file, true);
 </pre>
 <p>
-	Ejemplos: <?= $ejemplos ?>
+	Explorar: <?= $ejemplos ?>
 </p>
 
 <?= $documento ?>

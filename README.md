@@ -1,4 +1,4 @@
-# docsimple
+# miframe-docsimple
 
 Librería PHP para generar documentación a partir de los bloques de comentarios incluidos en el código.
 
@@ -17,17 +17,32 @@ Algunos tags a tener en cuenta:
 
 Uso:
 
-    $doc = new miFrame\DocSimple();
+    $doc = new \miFrame\DocSimple();
     $documento = $doc->getDocumentationHTML($filename, true);
 
 ## Class miFrame\DocSimple
 
-* evalCodeBlock -- Evalúa bloque de código encontrado entre bloques de documentación.
-* evalDocBlock -- Evalúa un bloque de código sanitizado previamente y recupera los atributos de documentación.
-* evalHTMLDoc (pendiente)
-* getDocumentation -- Recupera los bloques de documentación del archivo indicado.
+Las siguientes propiedades públicas pueden ser usadas:
+
+* $tags: array. Atributos para evaluar documentación. Se predefine en el __construct() para soportar el modelo PHP Javadoc.
+* $debug: boolean. TRUE para incluir mensajes de depuración.
+* $evalRequiredItems: boolean. TRUE para evaluar elementos mínimos requeridos.
+* $usesFunction: Función a usar al mostrar elemento "@uses" en $this->getDocumentationHTML(). Retorna texto HTML. Ej:
+      function ($modulo, $infomodulo) { ... return $html; }
+* $parserTextFunction: Función a usar para interpretar el texto (asumiendo formato Markdown). Retorna texto HTML. Ej:
+      function (text) { ... return $html; }
+
+Métodos relevantes:
+
+* evalCodeBlock (private function) -- Evalúa bloque de código encontrado entre bloques de documentación.
+* evalDocBlock (private function) -- Evalúa un bloque de código sanitizado previamente y recupera los atributos de documentación.
+* evalHTMLDoc (private function) -- Procesa contenido y genera texto HTML equivalente.
+* filename -- Retorna el nombre del último archivo procesado.
+* getDocumentation -- Recupera los bloques de documentación del archivo $filename.
 * getDocumentationHTML -- Retorna la documentación encontrada en formato HTML.
 * getSummary -- Descripción básica del elemento asociado.
+* parserLink -- Genera enlace para navegación de funciones en documentación HTML.
+* parserText -- Interprete de texto Markdown.
 
 ## Importante!
 
