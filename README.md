@@ -44,6 +44,10 @@ Métodos relevantes:
 * parserLink -- Genera enlace para navegación de funciones en documentación HTML.
 * parserText -- Interprete de texto Markdown.
 
+## Demo
+
+El script `tests/docsimple-demo.php` contiene una demostración completa de la funcionalidad de esta clase.
+
 ## Importante!
 
 Esta librería forma parte de los módulos PHP incluidos en [micode-manager](https://github.com/jjmejia/micode-manager).
